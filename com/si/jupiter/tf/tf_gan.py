@@ -55,5 +55,151 @@ def load_dataset(path, data_set='birds', image_size=64):
             np.array(ImageOps.fit(Image.open(path + '/' + i), (image_size, image_size), Image.ANTIALIAS)) / 127.5 - 1.0)
         sys.stdout.write("\r Loading : {}/{}".format(c + 1, number_of_images))
     print("\n")
+    # -1 表示的是依据实际情况定的 这里 -1其实是图片的数目即 number_of_images ,因为 后三维 本身就是 64 * 64 * 3,这就是原先图片的样本大小
     images = np.reshape(images, [-1, image_size, image_size, 3])
     return images.astype(np.float32)
+
+
+def conv2d(x, inputFeatures, outputFeatures, name):
+    """
+    实现卷积层的函数
+    
+    :param x: 
+    :param inputFeatures: 
+    :param outputFeatures: 
+    :param name: 
+    :return: 
+    """
+    """
+    这里说明一下 tensorflow 变量的两种创建方式
+    tf.get_variable() 以及 tf.Variable() 是 TensorFlow 中创建变量的两种主要方式；
+    如果在 tf.name_scope() 环境下分别使用 tf.get_variable() 和 tf.Variable()，
+    两者的主要区别在于 
+    tf.get_variable() 创建的变量名不受 name_scope 的影响；
+    tf.get_variable() 创建的变量，name 属性值不可以相同；tf.Variable() 创建变量时，name 属性值允许重复（底层实现时，会自动引入别名机制）
+    此外 tf.get_variable() 与 tf.Variable() 相比，多了一个 initilizer （初始化子）可选参数； 
+    tf.Variable() 对应地多了一个 initial_value 关键字参数，也即对于 tf.Variable 创建变量的方式，必须显式初始化；
+    """
+    with tf.variable_scope(name):
+        w = tf.get_variable("w", [5, 5, inputFeatures, outputFeatures],
+                            initializer=tf.truncated_normal_initializer(stddev=0.02))
+
+        b = tf.get_variable("b", [outputFeatures], initializer=tf.constant_initializer(0.0))
+        # http://code.replays.net/201705/79898.html 卷积介绍  tf.nn.conv2d TensorFlow 里的卷积方法
+        conv = tf.nn.conv2d(x, w, strides=[1, 2, 2, 1], padding="SAME") + b
+
+        return conv
+
+
+def conv_transpose(x, outputShape, name):
+    """
+    实现卷积转置的函数
+    :param x: 
+    :param outputShape: 
+    :param name: 
+    :return: 
+    """
+    with tf.variable_scope(name):
+        w = tf.get_variable("w", [5, 5, outputShape[-1], x.get_shape()[-1]],
+
+                            initializer=tf.truncated_normal_initializer(stddev=0.02))
+
+        b = tf.get_variable("b", [outputShape[-1]], initializer=tf.constant_initializer(0.0))
+
+        convt = tf.nn.conv2d_transpose(x, w, output_shape=outputShape, strides=[1, 2, 2, 1])
+
+        return convt
+
+
+# fully-conected layer
+def dense(x, inputFeatures, outputFeatures, scope=None, with_w=False):
+    """
+    实现致密完全连接层的函数
+    :param x: 
+    :param inputFeatures: 
+    :param outputFeatures: 
+    :param scope: 
+    :param with_w: 
+    :return: 
+    
+    """
+    with tf.variable_scope(scope or "Linear"):
+
+        matrix = tf.get_variable("Matrix", [inputFeatures, outputFeatures], tf.float32,
+
+                                  tf.random_normal_initializer(stddev=0.02))
+        bias = tf.get_variable("bias", [outputFeatures], initializer=tf.constant_initializer(0.0))
+        if with_w:
+            return tf.matmul(x, matrix) + bias, matrix, bias
+        else:
+            return tf.matmul(x, matrix) + bias
+
+
+def lrelu(x, leak=0.2, name="lrelu"):
+    """
+    Leaky ReLU function
+    :param x: 
+    :param leak: 
+    :param name: 
+    :return: 
+    """
+    with tf.variable_scope(name):
+        f1 = 0.5 * (1 + leak)
+        f2 = 0.5 * (1 - leak)
+        return f1 * x + f2 * abs(x)
+
+
+def generator(z, z_dim):
+    """
+    Used to generate fake images to fool the discriminator.
+    用上图中的体系架构构建一个生成器。诸如除去所有完全连接层，仅在发生器上使用ReLU以及使用批量归一化，这些任务DCGAN要求已经达标
+
+    :param z: The input random noise.
+
+    :param z_dim: The dimension of the input noise.
+
+    :return: Fake images -> [BATCH_SIZE, IMAGE_SIZE, IMAGE_SIZE, 3]
+
+    """
+    gf_dim = 64
+    z2 = dense(z, z_dim, gf_dim * 8 * 4 * 4, scope='g_h0_lin')
+    h0 = tf.nn.relu(batch_norm(tf.reshape(z2, [-1, 4, 4, gf_dim * 8]),
+                               center=True, scale=True, is_training=True, scope='g_bn1'))
+    h1 = tf.nn.relu(batch_norm(conv_transpose(h0, [mc.BATCH_SIZE, 8, 8, gf_dim * 4], "g_h1"),
+                               center=True, scale=True, is_training=True, scope='g_bn2'))
+    h2 = tf.nn.relu(batch_norm(conv_transpose(h1, [mc.BATCH_SIZE, 16, 16, gf_dim * 2], "g_h2"),
+                               center=True, scale=True, is_training=True, scope='g_bn3'))
+    h3 = tf.nn.relu(batch_norm(conv_transpose(h2, [mc.BATCH_SIZE, 32, 32, gf_dim * 1], "g_h3"),
+                               center=True, scale=True, is_training=True, scope='g_bn4'))
+    h4 = conv_transpose(h3, [mc.BATCH_SIZE, 64, 64, 3], "g_h4")
+    return tf.nn.tanh(h4)
+
+
+def discriminator(image, reuse=False):
+    """
+    我们再次避免了密集的完全连接的层，使用了Leaky ReLU，并在Discriminator处进行了批处理
+    Used to distinguish between real and fake images.
+
+    :param image: Images feed to the discriminate.
+
+    :param reuse: Set this to True to allow the weights to be reused.
+
+    :return: A logits value.
+
+    """
+    df_dim = 64
+    if reuse:
+        tf.get_variable_scope().reuse_variables()
+    h0 = lrelu(conv2d(image, 3, df_dim, name='d_h0_conv'))
+    h1 = lrelu(batch_norm(conv2d(h0, df_dim, df_dim * 2, name='d_h1_conv'),
+                          center=True, scale=True, is_training=True, scope='d_bn1'))
+    h2 = lrelu(batch_norm(conv2d(h1, df_dim * 2, df_dim * 4, name='d_h2_conv'),
+                          center=True, scale=True, is_training=True, scope='d_bn2'))
+    h3 = lrelu(batch_norm(conv2d(h2, df_dim * 4, df_dim * 8, name='d_h3_conv'),
+                          center=True, scale=True, is_training=True, scope='d_bn3'))
+    h4 = dense(tf.reshape(h3, [-1, 4 * 4 * df_dim * 8]), 4 * 4 * df_dim * 8, 1, scope='d_h3_lin')
+    return h4
+
+
+
+
