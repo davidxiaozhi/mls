@@ -23,6 +23,31 @@ import sys
 import numpy as np
 from PIL import ImageOps, Image  # python 图片处理包
 
+# Set LOAD to True to load a trained model or set it False to train a new one.
+
+LOAD = False
+
+# Dataset directories
+
+DATASET_PATH = './Dataset/Roses/'
+
+DATASET_CHOSEN = 'roses'  # required by utils.py -> ['birds', 'flowers', 'black_birds']
+
+# Model hyperparameters
+
+Z_DIM = 100  # The input noise vector dimension
+
+BATCH_SIZE = 12
+
+N_ITERATIONS = 30000
+
+LEARNING_RATE = 0.0002
+
+BETA_1 = 0.5
+
+IMAGE_SIZE = 64  # Change the Generator model if the IMAGE_SIZE needs to be changed to a different value
+
+
 
 def load_dataset(path, data_set='birds', image_size=64):
     """
@@ -163,15 +188,17 @@ def generator(z, z_dim):
     """
     gf_dim = 64
     z2 = dense(z, z_dim, gf_dim * 8 * 4 * 4, scope='g_h0_lin')
-    h0 = tf.nn.relu(batch_norm(tf.reshape(z2, [-1, 4, 4, gf_dim * 8]),
+    h0 = tf.nn.relu(tf.contrib.layers.batch_norm.batch_norm(tf.reshape(z2, [-1, 4, 4, gf_dim * 8]),
                                center=True, scale=True, is_training=True, scope='g_bn1'))
-    h1 = tf.nn.relu(batch_norm(conv_transpose(h0, [mc.BATCH_SIZE, 8, 8, gf_dim * 4], "g_h1"),
+    h1 = tf.nn.relu(tf.contrib.layers.batch_norm.batch_norm(conv_transpose(h0, [mc.BATCH_SIZE, 8, 8, gf_dim * 4], "g_h1"),
                                center=True, scale=True, is_training=True, scope='g_bn2'))
-    h2 = tf.nn.relu(batch_norm(conv_transpose(h1, [mc.BATCH_SIZE, 16, 16, gf_dim * 2], "g_h2"),
+    h2 = tf.nn.relu(tf.contrib.layers.batch_norm.batch_norm(conv_transpose(h1, [mc.BATCH_SIZE, 16, 16, gf_dim * 2], "g_h2"),
                                center=True, scale=True, is_training=True, scope='g_bn3'))
-    h3 = tf.nn.relu(batch_norm(conv_transpose(h2, [mc.BATCH_SIZE, 32, 32, gf_dim * 1], "g_h3"),
+    h3 = tf.nn.relu(tf.contrib.layers.batch_norm.batch_norm(conv_transpose(h2, [mc.BATCH_SIZE, 32, 32, gf_dim * 1], "g_h3"),
                                center=True, scale=True, is_training=True, scope='g_bn4'))
+
     h4 = conv_transpose(h3, [mc.BATCH_SIZE, 64, 64, 3], "g_h4")
+
     return tf.nn.tanh(h4)
 
 
@@ -201,5 +228,71 @@ def discriminator(image, reuse=False):
     return h4
 
 
+G = generator(zin, z_dim)  # G(z)
+
+Dx = discriminator(images)  # D(x)
+
+Dg = discriminator(G, reuse=True)  # D(G(x))
+
+d_loss_real = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(logits=Dx, targets=tf.ones_like(Dx)))
+
+d_loss_fake = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(logits=Dg, targets=tf.zeros_like(Dg))) d_loss_fake = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(logits=Dg, targets=tf.zeros_like(Dg)))
+
+dloss = d_loss_real + d_loss_fake
+
+gloss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(logits=Dg, targets=tf.ones_like(Dg)))
+
+# Get the variables which need to be trained
+
+t_vars = tf.trainable_variables()
+
+d_vars = [var for var in t_vars if 'd_' in var.name]
+
+g_vars = [var for var in t_vars if 'g_' in var.name]
+
+with tf.variable_scope(tf.get_variable_scope(), reuse=False) as scope:
+
+    d_optim = tf.train.AdamOptimizer(learning_rate, beta1=beta1).minimize(dloss, var_list=d_vars)
+
+g_optim = tf.train.AdamOptimizer(learning_rate, beta1=beta1).minimize(gloss, var_list=g_vars)
+
+with tf.Session() as sess:
+    tf.global_variables_initializer().run()
+
+    writer = tf.summary.FileWriter(logdir=logdir, graph=sess.graph)
+
+    if not load:
+
+        for idx in range(n_iter):
+
+            batch_images = next_batch(real_img, batch_size=batch_size)
+
+            batch_z = np.random.uniform(-1, 1, [batch_size, z_dim]).astype(np.float32)
+
+            for k in range(1):
+                sess.run([d_optim], feed_dict={images: batch_images, zin: batch_z})
+
+            for k in range(1):
+                sess.run([g_optim], feed_dict={zin: batch_z})
+
+            print("[%4d/%4d] time: %4.4f, " % (idx, n_iter, time.time() - start_time))
+
+            if idx % 10 == 0:
+                # Display the loss and run tf summaries
+
+                summary = sess.run(summary_op, feed_dict={images: batch_images, zin: batch_z})
+
+                writer.add_summary(summary, global_step=idx)
+
+                d_loss = d_loss_fake.eval({zin: display_z, images: batch_images})
+
+                g_loss = gloss.eval({zin: batch_z})
+
+                print("\n Discriminator loss: {0} \n Generator loss: {1} \n".format(d_loss, g_loss))
+
+            if idx % 1000 == 0:
+                # Save the model after every 1000 iternations
+
+                saver.save(sess, saved_models_path + "/train", global_step=idx)
 
 
